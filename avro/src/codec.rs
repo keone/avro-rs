@@ -106,11 +106,11 @@ impl Codec {
             }
             #[cfg(feature = "zstandard")]
             Codec::Zstandard(settings) => {
-                use std::io::Write;
-                let mut encoder = zstd::Encoder::new(Vec::new(), settings.compression_level as i32)
+                // Use the bulk API so zstd knows the input size. The streaming
+                // encoder sizes its tables for unbounded input, which costs
+                // ~86 MB per block at level 19 vs ~21 MB here.
+                *stream = zstd::bulk::compress(stream, settings.compression_level as i32)
                     .map_err(Details::ZstdCompress)?;
-                encoder.write_all(stream).map_err(Details::ZstdCompress)?;
-                *stream = encoder.finish().map_err(Details::ZstdCompress)?;
             }
             #[cfg(feature = "bzip")]
             Codec::Bzip2(settings) => {
@@ -377,6 +377,26 @@ mod tests {
     #[test]
     fn zstd_compress_and_decompress() -> TestResult {
         compress_and_decompress(Codec::Zstandard(zstandard::ZstandardSettings::default()))
+    }
+
+    /// The frame header should carry the content size, i.e. zstd was told
+    /// the input size up front.
+    #[cfg(feature = "zstandard")]
+    #[test]
+    fn zstd_compress_records_the_block_size_in_the_frame() -> TestResult {
+        for level in [0, 3, 19] {
+            let codec = Codec::Zstandard(zstandard::ZstandardSettings::new(level));
+            let mut stream = INPUT.to_vec();
+            codec.compress(&mut stream)?;
+            assert_eq!(
+                zstd::zstd_safe::get_frame_content_size(&stream).ok(),
+                Some(Some(INPUT.len() as u64)),
+                "level {level}"
+            );
+            codec.decompress(&mut stream)?;
+            assert_eq!(INPUT, stream.as_slice());
+        }
+        Ok(())
     }
 
     #[cfg(feature = "bzip")]
